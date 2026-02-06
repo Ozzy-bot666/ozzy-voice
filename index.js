@@ -19,6 +19,7 @@ const MODEL = process.env.MODEL || getDefaultModel(PROVIDER);
 const MEMORY_PATH = process.env.MEMORY_PATH || '/home/node/clawd';
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 const MEMORY_SECRET = process.env.MEMORY_SECRET || ''; // For /memory endpoint auth
+const TOOLS_ENABLED = process.env.TOOLS_ENABLED !== 'false'; // Enable by default
 
 // Cached memory (updated via API)
 let cachedMemory = {
@@ -28,6 +29,89 @@ let cachedMemory = {
   today: '',
   updatedAt: null
 };
+
+// Pending actions (to be picked up by Clawdbot)
+let pendingActions = [];
+
+// Tool definitions for Gemini
+const toolDefinitions = [
+  {
+    name: 'create_reminder',
+    description: 'Set a reminder for the user. They will receive a phone call at the specified time. Use for "remind me" requests.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          description: 'What to remind about (e.g., "call mom", "take medication")'
+        },
+        time: {
+          type: 'string', 
+          description: 'When to remind. Use natural language like "in 20 minutes", "at 5pm", "tomorrow at 9am", or ISO format.'
+        }
+      },
+      required: ['message', 'time']
+    }
+  },
+  {
+    name: 'send_message',
+    description: 'Send a text message to the user via Telegram. Use when they ask to "send", "text", or "message" something.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          description: 'The message content to send'
+        }
+      },
+      required: ['message']
+    }
+  }
+];
+
+// Convert to Gemini format
+const geminiTools = [{
+  functionDeclarations: toolDefinitions.map(t => ({
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters
+  }))
+}];
+
+// Execute a tool and return result
+async function executeTool(name, params, callId) {
+  const action = {
+    id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    tool: name,
+    params,
+    callId,
+    createdAt: new Date().toISOString(),
+    status: 'pending'
+  };
+  
+  log(`[${callId}] Tool call: ${name}`, params);
+  
+  switch (name) {
+    case 'create_reminder':
+      pendingActions.push(action);
+      return { 
+        success: true, 
+        message: `Reminder scheduled for ${params.time}`,
+        action_id: action.id
+      };
+      
+    case 'send_message':
+      pendingActions.push(action);
+      return { 
+        success: true, 
+        message: 'Message queued for delivery',
+        action_id: action.id
+      };
+      
+    default:
+      return { success: false, error: `Unknown tool: ${name}` };
+  }
+}
 
 // Provider API keys
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -115,10 +199,10 @@ async function callLLM(systemPrompt, messages) {
   }
 }
 
-async function* streamLLM(systemPrompt, messages) {
+async function* streamLLM(systemPrompt, messages, callId = 'unknown') {
   switch (PROVIDER) {
     case 'anthropic': yield* streamAnthropic(systemPrompt, messages); break;
-    case 'google': yield* streamGoogle(systemPrompt, messages); break;
+    case 'google': yield* streamGoogle(systemPrompt, messages, callId); break;
     case 'openai': yield* streamOpenAI(systemPrompt, messages); break;
   }
 }
@@ -176,9 +260,20 @@ async function callGoogle(systemPrompt, messages) {
   return result.response.text();
 }
 
-async function* streamGoogle(systemPrompt, messages) {
+async function* streamGoogle(systemPrompt, messages, callId = 'unknown') {
   if (!google) throw new Error('Google not configured');
-  const model = google.getGenerativeModel({ model: MODEL, systemInstruction: systemPrompt });
+  
+  const modelConfig = { 
+    model: MODEL, 
+    systemInstruction: systemPrompt
+  };
+  
+  // Add tools if enabled
+  if (TOOLS_ENABLED) {
+    modelConfig.tools = geminiTools;
+  }
+  
+  const model = google.getGenerativeModel(modelConfig);
   
   const history = [];
   let lastMessage = 'Hello';
@@ -196,12 +291,51 @@ async function* streamGoogle(systemPrompt, messages) {
     history.pop();
   }
   
-  const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 200, temperature: 0.7 } });
-  const result = await chat.sendMessageStream(lastMessage);
+  const chat = model.startChat({ 
+    history, 
+    generationConfig: { maxOutputTokens: 200, temperature: 0.7 }
+  });
   
-  for await (const chunk of result.stream) {
-    const text = chunk.text();
-    if (text) yield text;
+  // First call - might be text or function call
+  const result = await chat.sendMessage(lastMessage);
+  const response = result.response;
+  
+  // Check for function calls
+  const functionCalls = response.functionCalls();
+  
+  if (functionCalls && functionCalls.length > 0) {
+    // Execute tool(s) and get final response
+    for (const fc of functionCalls) {
+      log(`[${callId}] Function call detected: ${fc.name}`);
+      const toolResult = await executeTool(fc.name, fc.args, callId);
+      
+      // Send function result back to model
+      const followUp = await chat.sendMessage([{
+        functionResponse: {
+          name: fc.name,
+          response: toolResult
+        }
+      }]);
+      
+      // Stream the final response
+      const finalText = followUp.response.text();
+      if (finalText) {
+        // Yield in chunks for smoother streaming
+        const words = finalText.split(' ');
+        for (const word of words) {
+          yield word + ' ';
+        }
+      }
+    }
+  } else {
+    // No function call, stream the text response
+    const text = response.text();
+    if (text) {
+      const words = text.split(' ');
+      for (const word of words) {
+        yield word + ' ';
+      }
+    }
   }
 }
 
@@ -311,7 +445,7 @@ async function handleResponseRequired(ws, callId, event, systemPrompt) {
     
     // Stream the response
     let fullContent = '';
-    for await (const chunk of streamLLM(systemPrompt, messages)) {
+    for await (const chunk of streamLLM(systemPrompt, messages, callId)) {
       fullContent += chunk;
       
       // Send partial response
@@ -354,10 +488,15 @@ app.get('/health', (req, res) => {
     provider: PROVIDER,
     model: MODEL,
     websocket: 'enabled',
+    tools: {
+      enabled: TOOLS_ENABLED,
+      available: toolDefinitions.map(t => t.name)
+    },
     memory: {
       cached: !!cachedMemory.updatedAt,
       updatedAt: cachedMemory.updatedAt
-    }
+    },
+    pendingActions: pendingActions.filter(a => a.status === 'pending').length
   });
 });
 
@@ -419,6 +558,57 @@ app.get('/memory', (req, res) => {
       today: cachedMemory.today?.length || 0
     }
   });
+});
+
+// ============ PENDING ACTIONS ENDPOINTS ============
+
+// GET pending actions (for Clawdbot to poll)
+app.get('/actions', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  // Return pending actions and clear them
+  const actions = pendingActions.filter(a => a.status === 'pending');
+  res.json({ actions, count: actions.length });
+});
+
+// POST mark action as processed
+app.post('/actions/:id/complete', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  const { id } = req.params;
+  const action = pendingActions.find(a => a.id === id);
+  
+  if (action) {
+    action.status = 'completed';
+    action.completedAt = new Date().toISOString();
+    res.json({ ok: true, action });
+  } else {
+    res.status(404).json({ error: 'Action not found' });
+  }
+});
+
+// DELETE clear all completed actions (cleanup)
+app.delete('/actions/completed', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  const before = pendingActions.length;
+  pendingActions = pendingActions.filter(a => a.status === 'pending');
+  res.json({ ok: true, removed: before - pendingActions.length });
 });
 
 // Catch-all for unmatched routes
