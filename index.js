@@ -703,6 +703,67 @@ async function handleResponseRequired(ws, callId, event, systemPrompt) {
 
 // ============ HTTP ENDPOINTS ============
 
+// CORS middleware for web call endpoint
+const webCallCors = (req, res, next) => {
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://ozzy-frontend.onrender.com'
+  ];
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+};
+
+// Create web call - proxy to Retell API
+app.options('/create-web-call', webCallCors);
+app.post('/create-web-call', webCallCors, async (req, res) => {
+  trackRequest('/create-web-call', false, req.ip, req.headers['user-agent']);
+  
+  const { agent_id, metadata, retell_llm_dynamic_variables } = req.body;
+  
+  if (!process.env.RETELL_API_KEY) {
+    console.error('RETELL_API_KEY not configured');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+  
+  const payload = { agent_id };
+  if (metadata) payload.metadata = metadata;
+  if (retell_llm_dynamic_variables) payload.retell_llm_dynamic_variables = retell_llm_dynamic_variables;
+  
+  try {
+    const response = await fetch('https://api.retellai.com/v2/create-web-call', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      console.error('Retell API error:', data);
+      return res.status(response.status).json(data);
+    }
+    
+    res.status(201).json(data);
+  } catch (error) {
+    console.error('Error creating web call:', error.message);
+    res.status(500).json({ error: 'Failed to create web call', details: error.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   trackRequest('/health', false, req.ip);
   
