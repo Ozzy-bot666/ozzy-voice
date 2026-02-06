@@ -25,6 +25,7 @@
     "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
     "openai": "^6.18.0",
-    "retell-sdk": "^4.66.0"
+    "retell-sdk": "^4.66.0",
+    "ws": "^8.19.0"
   }
 }

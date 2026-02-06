@@ -1,33 +1,28 @@
 import express from 'express';
+import { createServer } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
-import { Retell } from 'retell-sdk';
-import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import { readFileSync, existsSync, appendFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 const app = express();
-
-// Security middleware
 app.use(helmet());
 app.use(express.json({ limit: '100kb' }));
 
 // Config
 const PORT = process.env.PORT || 3000;
-const PROVIDER = process.env.PROVIDER || 'anthropic'; // anthropic | google | openai
+const PROVIDER = process.env.PROVIDER || 'anthropic';
 const MODEL = process.env.MODEL || getDefaultModel(PROVIDER);
 const MEMORY_PATH = process.env.MEMORY_PATH || '/home/node/clawd';
-const API_KEY = process.env.API_KEY;
-const ALLOWED_IPS = process.env.ALLOWED_IPS?.split(',').map(ip => ip.trim()).filter(Boolean) || [];
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 
-// Provider-specific config
+// Provider API keys
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const RETELL_API_KEY = process.env.RETELL_API_KEY; // For signature verification
 
 function getDefaultModel(provider) {
   switch (provider) {
@@ -38,121 +33,22 @@ function getDefaultModel(provider) {
   }
 }
 
-// Initialize clients
+// Initialize LLM clients
 let anthropic, google, openai;
+if (ANTHROPIC_API_KEY) anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+if (GOOGLE_API_KEY) google = new GoogleGenerativeAI(GOOGLE_API_KEY);
+if (OPENAI_API_KEY) openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-if (ANTHROPIC_API_KEY) {
-  anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-}
-if (GOOGLE_API_KEY) {
-  google = new GoogleGenerativeAI(GOOGLE_API_KEY);
-}
-if (OPENAI_API_KEY) {
-  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+function log(...args) {
+  if (LOG_REQUESTS) console.log(new Date().toISOString(), ...args);
 }
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  message: { error: 'Too many requests, please try again later' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip
-});
-
-app.use('/v1', limiter);
-
-// Audit logging
-function auditLog(req, status, details = {}) {
-  if (!LOG_REQUESTS) return;
-  
-  const entry = {
-    timestamp: new Date().toISOString(),
-    ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip,
-    method: req.method,
-    path: req.path,
-    provider: PROVIDER,
-    model: MODEL,
-    status,
-    ...details
-  };
-  
-  console.log('[AUDIT]', JSON.stringify(entry));
-}
-
-// IP whitelist middleware
-function ipWhitelist(req, res, next) {
-  if (ALLOWED_IPS.length === 0) return next();
-  
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
-  
-  const allowed = ALLOWED_IPS.some(allowedIp => {
-    if (allowedIp === '*') return true;
-    if (allowedIp.endsWith('*')) {
-      return clientIp.startsWith(allowedIp.slice(0, -1));
-    }
-    return clientIp === allowedIp;
-  });
-  
-  if (!allowed) {
-    auditLog(req, 403, { reason: 'IP not whitelisted', clientIp });
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  
-  next();
-}
-
-// Auth middleware - supports both Bearer token and Retell signature
-function authenticate(req, res, next) {
-  // Option 1: Retell signature verification
-  const retellSignature = req.headers['x-retell-signature'];
-  if (retellSignature && RETELL_API_KEY) {
-    try {
-      const isValid = Retell.verify(
-        JSON.stringify(req.body),
-        RETELL_API_KEY,
-        retellSignature
-      );
-      if (isValid) {
-        auditLog(req, 200, { auth: 'retell-signature' });
-        return next();
-      }
-    } catch (e) {
-      console.error('Retell signature verification error:', e.message);
-    }
-    auditLog(req, 401, { reason: 'Invalid Retell signature' });
-    return res.status(401).json({ error: 'Invalid Retell signature' });
-  }
-  
-  // Option 2: Bearer token auth
-  if (API_KEY) {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      auditLog(req, 401, { reason: 'Missing auth header' });
-      return res.status(401).json({ error: 'Missing or invalid authorization header' });
-    }
-    
-    if (authHeader.substring(7) !== API_KEY) {
-      auditLog(req, 401, { reason: 'Invalid API key' });
-      return res.status(401).json({ error: 'Invalid API key' });
-    }
-    
-    auditLog(req, 200, { auth: 'bearer-token' });
-    return next();
-  }
-  
-  // No auth configured
-  auditLog(req, 200, { auth: 'disabled' });
-  next();
-}
-
-// Read memory files and build system context
+// Build system context from memory files
 function buildSystemContext() {
   const files = ['SOUL.md', 'USER.md', 'MEMORY.md'];
-  let context = `You are Ozzy, a snarky AI bat assistant. You're currently in a voice conversation.
+  let context = `You are Ozzy, a snarky AI bat assistant in a voice conversation.
 Keep responses concise and conversational - this is spoken, not written.
-Be natural, use contractions, and don't be overly formal.
+Be natural, use contractions, don't be overly formal.
 Respond in the same language as the user speaks to you.
 
 `;
@@ -172,341 +68,299 @@ Respond in the same language as the user speaks to you.
   const todayPath = join(MEMORY_PATH, 'memory', `${today}.md`);
   if (existsSync(todayPath)) {
     try {
-      context += `\n## Today's Context (${today})\n${readFileSync(todayPath, 'utf-8')}\n`;
-    } catch (e) {
-      console.error(`Failed to read today's memory:`, e.message);
-    }
+      context += `\n## Today (${today})\n${readFileSync(todayPath, 'utf-8')}\n`;
+    } catch (e) {}
   }
 
   return context;
 }
 
-// Validate request
-function validateRequest(body) {
-  if (!body?.messages || !Array.isArray(body.messages)) return 'messages array is required';
-  if (body.messages.length > 100) return 'Too many messages (max 100)';
-  
-  for (const msg of body.messages) {
-    if (!['system', 'user', 'assistant'].includes(msg.role)) return 'Invalid message role';
-    if (msg.content === undefined || msg.content === null) return 'Message content is required';
-  }
-  
-  if (body.max_tokens && (body.max_tokens < 1 || body.max_tokens > 8192)) return 'max_tokens must be between 1 and 8192';
-  if (body.temperature && (body.temperature < 0 || body.temperature > 2)) return 'temperature must be between 0 and 2';
-  
-  return null;
+// Convert Retell transcript to messages format
+function transcriptToMessages(transcript) {
+  return transcript.map(t => ({
+    role: t.role === 'agent' ? 'assistant' : 'user',
+    content: t.content
+  }));
 }
 
-// ============ ANTHROPIC ============
-async function callAnthropic(systemPrompt, messages, options) {
-  const anthropicMessages = messages
-    .filter(m => m.role !== 'system')
-    .map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }));
+// ============ LLM PROVIDERS ============
 
-  if (anthropicMessages.length === 0) {
-    anthropicMessages.push({ role: 'user', content: 'Hello' });
-  }
-
-  if (options.stream) {
-    return anthropic.messages.stream({
-      model: MODEL,
-      max_tokens: options.max_tokens,
-      temperature: options.temperature,
-      system: systemPrompt,
-      messages: anthropicMessages
-    });
-  } else {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: options.max_tokens,
-      temperature: options.temperature,
-      system: systemPrompt,
-      messages: anthropicMessages
-    });
-    
-    return {
-      content: response.content[0]?.text || '',
-      usage: {
-        prompt_tokens: response.usage?.input_tokens || 0,
-        completion_tokens: response.usage?.output_tokens || 0
-      }
-    };
+async function callLLM(systemPrompt, messages) {
+  switch (PROVIDER) {
+    case 'anthropic': return callAnthropic(systemPrompt, messages);
+    case 'google': return callGoogle(systemPrompt, messages);
+    case 'openai': return callOpenAI(systemPrompt, messages);
+    default: throw new Error(`Unknown provider: ${PROVIDER}`);
   }
 }
 
-async function* streamAnthropic(stream) {
+async function* streamLLM(systemPrompt, messages) {
+  switch (PROVIDER) {
+    case 'anthropic': yield* streamAnthropic(systemPrompt, messages); break;
+    case 'google': yield* streamGoogle(systemPrompt, messages); break;
+    case 'openai': yield* streamOpenAI(systemPrompt, messages); break;
+  }
+}
+
+async function callAnthropic(systemPrompt, messages) {
+  if (!anthropic) throw new Error('Anthropic not configured');
+  const response = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 200,
+    temperature: 0.7,
+    system: systemPrompt,
+    messages: messages.length > 0 ? messages : [{ role: 'user', content: 'Hello' }]
+  });
+  return response.content[0]?.text || '';
+}
+
+async function* streamAnthropic(systemPrompt, messages) {
+  if (!anthropic) throw new Error('Anthropic not configured');
+  const stream = await anthropic.messages.stream({
+    model: MODEL,
+    max_tokens: 200,
+    temperature: 0.7,
+    system: systemPrompt,
+    messages: messages.length > 0 ? messages : [{ role: 'user', content: 'Hello' }]
+  });
   for await (const event of stream) {
     if (event.type === 'content_block_delta' && event.delta?.text) {
-      yield { content: event.delta.text, done: false };
-    } else if (event.type === 'message_stop') {
-      yield { content: '', done: true };
+      yield event.delta.text;
     }
   }
 }
 
-// ============ GOOGLE ============
-async function callGoogle(systemPrompt, messages, options) {
-  const model = google.getGenerativeModel({ 
-    model: MODEL,
-    systemInstruction: systemPrompt
-  });
-
-  // Convert to Google format
+async function callGoogle(systemPrompt, messages) {
+  if (!google) throw new Error('Google not configured');
+  const model = google.getGenerativeModel({ model: MODEL, systemInstruction: systemPrompt });
+  
   const history = [];
-  let lastUserMessage = 'Hello';
+  let lastMessage = 'Hello';
   
   for (const msg of messages) {
-    if (msg.role === 'system') continue;
-    const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-    
     if (msg.role === 'user') {
-      lastUserMessage = content;
-      history.push({ role: 'user', parts: [{ text: content }] });
-    } else if (msg.role === 'assistant') {
-      history.push({ role: 'model', parts: [{ text: content }] });
+      lastMessage = msg.content;
+      history.push({ role: 'user', parts: [{ text: msg.content }] });
+    } else {
+      history.push({ role: 'model', parts: [{ text: msg.content }] });
     }
   }
-
-  // Remove last user message from history (it becomes the prompt)
+  
   if (history.length > 0 && history[history.length - 1].role === 'user') {
     history.pop();
   }
-
-  const chat = model.startChat({
-    history,
-    generationConfig: {
-      maxOutputTokens: options.max_tokens,
-      temperature: options.temperature
-    }
-  });
-
-  if (options.stream) {
-    return chat.sendMessageStream(lastUserMessage);
-  } else {
-    const result = await chat.sendMessage(lastUserMessage);
-    const response = await result.response;
-    
-    return {
-      content: response.text(),
-      usage: {
-        prompt_tokens: response.usageMetadata?.promptTokenCount || 0,
-        completion_tokens: response.usageMetadata?.candidatesTokenCount || 0
-      }
-    };
-  }
+  
+  const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 200, temperature: 0.7 } });
+  const result = await chat.sendMessage(lastMessage);
+  return result.response.text();
 }
 
-async function* streamGoogle(stream) {
-  for await (const chunk of stream.stream) {
+async function* streamGoogle(systemPrompt, messages) {
+  if (!google) throw new Error('Google not configured');
+  const model = google.getGenerativeModel({ model: MODEL, systemInstruction: systemPrompt });
+  
+  const history = [];
+  let lastMessage = 'Hello';
+  
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      lastMessage = msg.content;
+      history.push({ role: 'user', parts: [{ text: msg.content }] });
+    } else {
+      history.push({ role: 'model', parts: [{ text: msg.content }] });
+    }
+  }
+  
+  if (history.length > 0 && history[history.length - 1].role === 'user') {
+    history.pop();
+  }
+  
+  const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 200, temperature: 0.7 } });
+  const result = await chat.sendMessageStream(lastMessage);
+  
+  for await (const chunk of result.stream) {
     const text = chunk.text();
-    if (text) {
-      yield { content: text, done: false };
-    }
-  }
-  yield { content: '', done: true };
-}
-
-// ============ OPENAI ============
-async function callOpenAI(systemPrompt, messages, options) {
-  const openaiMessages = [
-    { role: 'system', content: systemPrompt },
-    ...messages.filter(m => m.role !== 'system').map(m => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-    }))
-  ];
-
-  if (options.stream) {
-    return openai.chat.completions.create({
-      model: MODEL,
-      messages: openaiMessages,
-      max_tokens: options.max_tokens,
-      temperature: options.temperature,
-      stream: true
-    });
-  } else {
-    const response = await openai.chat.completions.create({
-      model: MODEL,
-      messages: openaiMessages,
-      max_tokens: options.max_tokens,
-      temperature: options.temperature
-    });
-    
-    return {
-      content: response.choices[0]?.message?.content || '',
-      usage: {
-        prompt_tokens: response.usage?.prompt_tokens || 0,
-        completion_tokens: response.usage?.completion_tokens || 0
-      }
-    };
+    if (text) yield text;
   }
 }
 
-async function* streamOpenAI(stream) {
+async function callOpenAI(systemPrompt, messages) {
+  if (!openai) throw new Error('OpenAI not configured');
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    max_tokens: 200,
+    temperature: 0.7,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...(messages.length > 0 ? messages : [{ role: 'user', content: 'Hello' }])
+    ]
+  });
+  return response.choices[0]?.message?.content || '';
+}
+
+async function* streamOpenAI(systemPrompt, messages) {
+  if (!openai) throw new Error('OpenAI not configured');
+  const stream = await openai.chat.completions.create({
+    model: MODEL,
+    max_tokens: 200,
+    temperature: 0.7,
+    stream: true,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...(messages.length > 0 ? messages : [{ role: 'user', content: 'Hello' }])
+    ]
+  });
   for await (const chunk of stream) {
     const content = chunk.choices[0]?.delta?.content;
-    if (content) {
-      yield { content, done: false };
-    }
-    if (chunk.choices[0]?.finish_reason) {
-      yield { content: '', done: true };
-    }
+    if (content) yield content;
   }
 }
 
-// ============ UNIFIED INTERFACE ============
-async function callLLM(systemPrompt, messages, options) {
-  switch (PROVIDER) {
-    case 'anthropic':
-      if (!anthropic) throw new Error('Anthropic not configured');
-      return callAnthropic(systemPrompt, messages, options);
-    case 'google':
-      if (!google) throw new Error('Google not configured');
-      return callGoogle(systemPrompt, messages, options);
-    case 'openai':
-      if (!openai) throw new Error('OpenAI not configured');
-      return callOpenAI(systemPrompt, messages, options);
-    default:
-      throw new Error(`Unknown provider: ${PROVIDER}`);
-  }
-}
+// ============ RETELL WEBSOCKET HANDLER ============
 
-async function* streamLLM(stream) {
-  switch (PROVIDER) {
-    case 'anthropic': yield* streamAnthropic(stream); break;
-    case 'google': yield* streamGoogle(stream); break;
-    case 'openai': yield* streamOpenAI(stream); break;
-  }
-}
-
-// Convert to OpenAI response format
-function toOpenAIResponse(result) {
-  return {
-    id: `chatcmpl-${Date.now()}`,
-    object: 'chat.completion',
-    created: Math.floor(Date.now() / 1000),
-    model: MODEL,
-    choices: [{
-      index: 0,
-      message: { role: 'assistant', content: result.content },
-      finish_reason: 'stop'
-    }],
-    usage: {
-      prompt_tokens: result.usage.prompt_tokens,
-      completion_tokens: result.usage.completion_tokens,
-      total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens
+function handleRetellConnection(ws, callId) {
+  log(`[${callId}] WebSocket connected`);
+  
+  const systemPrompt = buildSystemContext();
+  
+  // Send initial config
+  ws.send(JSON.stringify({
+    response_type: 'config',
+    config: {
+      auto_reconnect: true,
+      call_details: false
     }
-  };
-}
-
-function toOpenAIStreamChunk(content, done) {
-  return {
-    id: `chatcmpl-stream`,
-    object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
-    model: MODEL,
-    choices: [{
-      index: 0,
-      delta: done ? {} : { content },
-      finish_reason: done ? 'stop' : null
-    }]
-  };
-}
-
-// Health check
-app.get('/health', limiter, (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    provider: PROVIDER,
-    model: MODEL,
-    auth: {
-      bearer: API_KEY ? 'enabled' : 'disabled',
-      retell: RETELL_API_KEY ? 'enabled' : 'disabled',
-      ipWhitelist: ALLOWED_IPS.length > 0 ? 'enabled' : 'disabled'
+  }));
+  
+  // Send initial greeting (empty = wait for user to speak first)
+  ws.send(JSON.stringify({
+    response_type: 'response',
+    response_id: 0,
+    content: '',
+    content_complete: true
+  }));
+  
+  ws.on('message', async (data) => {
+    try {
+      const event = JSON.parse(data.toString());
+      log(`[${callId}] Received:`, event.interaction_type);
+      
+      switch (event.interaction_type) {
+        case 'ping_pong':
+          // Respond to ping
+          ws.send(JSON.stringify({
+            response_type: 'ping_pong',
+            timestamp: Date.now()
+          }));
+          break;
+          
+        case 'update_only':
+          // Just an update, no response needed
+          break;
+          
+        case 'response_required':
+        case 'reminder_required':
+          // Generate response
+          await handleResponseRequired(ws, callId, event, systemPrompt);
+          break;
+          
+        default:
+          log(`[${callId}] Unknown interaction_type:`, event.interaction_type);
+      }
+    } catch (e) {
+      console.error(`[${callId}] Error processing message:`, e);
     }
   });
-});
+  
+  ws.on('close', () => {
+    log(`[${callId}] WebSocket closed`);
+  });
+  
+  ws.on('error', (err) => {
+    console.error(`[${callId}] WebSocket error:`, err);
+  });
+}
 
-// Chat completions endpoint
-app.post('/v1/chat/completions', ipWhitelist, authenticate, async (req, res) => {
-  const startTime = Date.now();
+async function handleResponseRequired(ws, callId, event, systemPrompt) {
+  const { response_id, transcript } = event;
   
   try {
-    const validationError = validateRequest(req.body);
-    if (validationError) {
-      auditLog(req, 400, { reason: validationError });
-      return res.status(400).json({ error: validationError });
-    }
-
-    const { messages, stream = false, max_tokens = 1024, temperature = 0.7 } = req.body;
-    const memoryContext = buildSystemContext();
+    const messages = transcriptToMessages(transcript || []);
+    log(`[${callId}] Generating response for response_id=${response_id}, messages=${messages.length}`);
     
-    // Extract system messages from request
-    const systemFromRequest = messages
-      .filter(m => m.role === 'system')
-      .map(m => m.content)
-      .join('\n');
-    
-    const fullSystemPrompt = memoryContext + '\n' + systemFromRequest;
-
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const streamResponse = await callLLM(fullSystemPrompt, messages, { stream: true, max_tokens, temperature });
+    // Stream the response
+    let fullContent = '';
+    for await (const chunk of streamLLM(systemPrompt, messages)) {
+      fullContent += chunk;
       
-      for await (const chunk of streamLLM(streamResponse)) {
-        res.write(`data: ${JSON.stringify(toOpenAIStreamChunk(chunk.content, chunk.done))}\n\n`);
-      }
-      
-      res.write('data: [DONE]\n\n');
-      res.end();
-      
-      auditLog(req, 200, { stream: true, durationMs: Date.now() - startTime });
-    } else {
-      const result = await callLLM(fullSystemPrompt, messages, { stream: false, max_tokens, temperature });
-      
-      auditLog(req, 200, { 
-        stream: false, 
-        durationMs: Date.now() - startTime,
-        inputTokens: result.usage.prompt_tokens,
-        outputTokens: result.usage.completion_tokens
-      });
-
-      res.json(toOpenAIResponse(result));
+      // Send partial response
+      ws.send(JSON.stringify({
+        response_type: 'response',
+        response_id,
+        content: chunk,
+        content_complete: false
+      }));
     }
-  } catch (error) {
-    console.error('Error:', error);
-    auditLog(req, 500, { error: error.message });
-    res.status(500).json({ error: { message: 'Internal server error', type: 'api_error' } });
+    
+    // Send final response marker
+    ws.send(JSON.stringify({
+      response_type: 'response',
+      response_id,
+      content: '',
+      content_complete: true
+    }));
+    
+    log(`[${callId}] Response complete: ${fullContent.substring(0, 50)}...`);
+    
+  } catch (e) {
+    console.error(`[${callId}] LLM error:`, e);
+    
+    // Send error response
+    ws.send(JSON.stringify({
+      response_type: 'response',
+      response_id,
+      content: "Sorry, I'm having trouble responding right now.",
+      content_complete: true
+    }));
   }
-});
+}
 
-// Models endpoint
-app.get('/v1/models', ipWhitelist, authenticate, (req, res) => {
+// ============ HTTP ENDPOINTS ============
+
+app.get('/health', (req, res) => {
   res.json({
-    object: 'list',
-    data: [{
-      id: MODEL,
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: PROVIDER
-    }]
+    status: 'ok',
+    provider: PROVIDER,
+    model: MODEL,
+    websocket: 'enabled'
   });
 });
 
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+// Catch-all for unmatched routes
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found. WebSocket endpoint: wss://host/llm-websocket/:call_id' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Ozzy Voice endpoint running on port ${PORT}`);
+// ============ SERVER SETUP ============
+
+const server = createServer(app);
+
+const wss = new WebSocketServer({ 
+  server,
+  path: /^\/llm-websocket\/[^\/]+$/
+});
+
+wss.on('connection', (ws, req) => {
+  // Extract call_id from path
+  const match = req.url.match(/\/llm-websocket\/([^\/\?]+)/);
+  const callId = match ? match[1] : 'unknown';
+  handleRetellConnection(ws, callId);
+});
+
+server.listen(PORT, () => {
+  console.log(`Ozzy Voice (Retell WebSocket) running on port ${PORT}`);
   console.log(`Provider: ${PROVIDER}`);
   console.log(`Model: ${MODEL}`);
-  console.log(`Memory path: ${MEMORY_PATH}`);
-  console.log(`Auth: Bearer=${API_KEY ? 'yes' : 'no'}, Retell=${RETELL_API_KEY ? 'yes' : 'no'}`);
-  console.log(`IP whitelist: ${ALLOWED_IPS.length > 0 ? ALLOWED_IPS.join(', ') : 'disabled'}`);
+  console.log(`WebSocket endpoint: wss://host/llm-websocket/:call_id`);
+  console.log(`Health check: http://host/health`);
 });
