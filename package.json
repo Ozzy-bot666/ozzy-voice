@@ -8,12 +8,20 @@
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
-  "keywords": ["openai", "anthropic", "voice", "retell", "pipecat"],
+  "keywords": [
+    "openai",
+    "anthropic",
+    "voice",
+    "retell",
+    "pipecat"
+  ],
   "author": "Ozzy",
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0"
   }
 }
