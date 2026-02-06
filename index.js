@@ -28,35 +28,71 @@ const securityMetrics = {
     total: 0,
     authenticated: 0,
     failed_auth: 0,
-    by_endpoint: {}
+    by_endpoint: {},
+    by_ip: {}  // Track requests per IP
   },
   lastFailedAuth: null,
   recentFailedAuths: [], // Last 100, for pattern detection
+  suspiciousUserAgents: [], // Detected suspicious user agents
   wsConnections: {
     total: 0,
     active: 0
   }
 };
 
+// Suspicious user agent patterns
+const SUSPICIOUS_UA_PATTERNS = [
+  /sqlmap/i, /nikto/i, /nmap/i, /masscan/i, /zgrab/i,
+  /scanner/i, /exploit/i, /injection/i, /attack/i,
+  /^python-requests/i, /^curl\//i, /^wget\//i, /libwww-perl/i,
+  /havij/i, /acunetix/i, /nessus/i, /burp/i, /dirbuster/i
+];
+
+function isSuspiciousUserAgent(ua) {
+  if (!ua) return false;
+  return SUSPICIOUS_UA_PATTERNS.some(pattern => pattern.test(ua));
+}
+
 // Track request for security metrics
-function trackRequest(endpoint, authenticated, ip) {
+function trackRequest(endpoint, authenticated, ip, userAgent) {
   securityMetrics.requests.total++;
   securityMetrics.requests.by_endpoint[endpoint] = (securityMetrics.requests.by_endpoint[endpoint] || 0) + 1;
+  
+  // Track by IP
+  const normalizedIp = ip ? ip.replace(/^::ffff:/, '') : 'unknown';
+  securityMetrics.requests.by_ip[normalizedIp] = (securityMetrics.requests.by_ip[normalizedIp] || 0) + 1;
   
   if (authenticated) {
     securityMetrics.requests.authenticated++;
   }
+  
+  // Check for suspicious user agent
+  if (userAgent && isSuspiciousUserAgent(userAgent)) {
+    securityMetrics.suspiciousUserAgents.push({
+      time: Date.now(),
+      ip: normalizedIp,
+      userAgent: userAgent.substring(0, 200), // Truncate
+      endpoint
+    });
+    // Keep last 50
+    if (securityMetrics.suspiciousUserAgents.length > 50) {
+      securityMetrics.suspiciousUserAgents.shift();
+    }
+  }
 }
 
-function trackFailedAuth(endpoint, ip) {
+function trackFailedAuth(endpoint, ip, userAgent) {
   securityMetrics.requests.failed_auth++;
   securityMetrics.lastFailedAuth = new Date().toISOString();
+  
+  const normalizedIp = ip ? ip.replace(/^::ffff:/, '') : 'unknown';
   
   // Keep last 100 failed auths for pattern analysis
   securityMetrics.recentFailedAuths.push({
     time: Date.now(),
     endpoint,
-    ip: ip ? ip.replace(/^::ffff:/, '') : 'unknown' // Normalize IPv4-mapped IPv6
+    ip: normalizedIp,
+    userAgent: userAgent ? userAgent.substring(0, 100) : null
   });
   if (securityMetrics.recentFailedAuths.length > 100) {
     securityMetrics.recentFailedAuths.shift();
@@ -66,15 +102,17 @@ function trackFailedAuth(endpoint, ip) {
 // Auth check helper with tracking
 function checkAuth(req, res, endpoint) {
   const authHeader = req.headers.authorization;
+  const userAgent = req.headers['user-agent'];
+  
   if (MEMORY_SECRET) {
     if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
-      trackFailedAuth(endpoint, req.ip);
-      trackRequest(endpoint, false, req.ip);
+      trackFailedAuth(endpoint, req.ip, userAgent);
+      trackRequest(endpoint, false, req.ip, userAgent);
       res.status(401).json({ error: 'Unauthorized' });
       return false;
     }
   }
-  trackRequest(endpoint, true, req.ip);
+  trackRequest(endpoint, true, req.ip, userAgent);
   return true;
 }
 
@@ -751,6 +789,61 @@ app.get('/memory', (req, res) => {
       user: cachedMemory.user?.length || 0,
       memory: cachedMemory.memory?.length || 0,
       today: cachedMemory.today?.length || 0
+    }
+  });
+});
+
+// ============ SECURITY ENDPOINT ============
+
+// GET detailed security metrics (auth required)
+app.get('/security', (req, res) => {
+  if (!checkAuth(req, res, '/security')) return;
+  
+  const oneHourAgo = Date.now() - 3600000;
+  const recentFailedAuths = securityMetrics.recentFailedAuths.filter(a => a.time > oneHourAgo);
+  
+  // Analyze IP patterns
+  const ipCounts = {};
+  for (const auth of recentFailedAuths) {
+    ipCounts[auth.ip] = (ipCounts[auth.ip] || 0) + 1;
+  }
+  
+  // Find suspicious IPs (multiple failed auths)
+  const suspiciousIps = Object.entries(ipCounts)
+    .filter(([ip, count]) => count >= 3)
+    .map(([ip, count]) => ({ ip, failedAttempts: count }))
+    .sort((a, b) => b.failedAttempts - a.failedAttempts);
+  
+  // Recent suspicious user agents
+  const recentSuspiciousUAs = securityMetrics.suspiciousUserAgents
+    .filter(ua => ua.time > oneHourAgo);
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor((Date.now() - securityMetrics.startTime) / 1000),
+    summary: {
+      totalRequests: securityMetrics.requests.total,
+      authenticatedRequests: securityMetrics.requests.authenticated,
+      totalFailedAuths: securityMetrics.requests.failed_auth,
+      failedAuthsLastHour: recentFailedAuths.length,
+      suspiciousIpsLastHour: suspiciousIps.length,
+      suspiciousUAsLastHour: recentSuspiciousUAs.length,
+      activeWsConnections: securityMetrics.wsConnections.active
+    },
+    alerts: {
+      bruteForceDetected: recentFailedAuths.length > 10,
+      suspiciousIpsDetected: suspiciousIps.length > 0,
+      suspiciousUAsDetected: recentSuspiciousUAs.length > 0
+    },
+    details: {
+      suspiciousIps,
+      recentFailedAuths: recentFailedAuths.slice(-20), // Last 20
+      suspiciousUserAgents: recentSuspiciousUAs.slice(-10),
+      requestsByEndpoint: securityMetrics.requests.by_endpoint,
+      topIps: Object.entries(securityMetrics.requests.by_ip)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([ip, count]) => ({ ip, requests: count }))
     }
   });
 });
