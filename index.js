@@ -345,14 +345,25 @@ app.use((req, res) => {
 
 const server = createServer(app);
 
-const wss = new WebSocketServer({ 
-  server,
-  path: /^\/llm-websocket\/[^\/]+$/
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const pathname = request.url?.split('?')[0] || '';
+  console.log('WebSocket upgrade request:', pathname);
+  
+  if (pathname.startsWith('/llm-websocket/')) {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
 });
 
 wss.on('connection', (ws, req) => {
   // Extract call_id from path
-  const match = req.url.match(/\/llm-websocket\/([^\/\?]+)/);
+  const pathname = req.url?.split('?')[0] || '';
+  const match = pathname.match(/\/llm-websocket\/([^\/]+)/);
   const callId = match ? match[1] : 'unknown';
   handleRetellConnection(ws, callId);
 });
