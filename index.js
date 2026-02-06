@@ -18,6 +18,16 @@ const PROVIDER = process.env.PROVIDER || 'anthropic';
 const MODEL = process.env.MODEL || getDefaultModel(PROVIDER);
 const MEMORY_PATH = process.env.MEMORY_PATH || '/home/node/clawd';
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
+const MEMORY_SECRET = process.env.MEMORY_SECRET || ''; // For /memory endpoint auth
+
+// Cached memory (updated via API)
+let cachedMemory = {
+  soul: '',
+  user: '',
+  memory: '',
+  today: '',
+  updatedAt: null
+};
 
 // Provider API keys
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -43,9 +53,8 @@ function log(...args) {
   if (LOG_REQUESTS) console.log(new Date().toISOString(), ...args);
 }
 
-// Build system context from memory files
+// Build system context from memory files or cache
 function buildSystemContext() {
-  const files = ['SOUL.md', 'USER.md', 'MEMORY.md'];
   let context = `You are Ozzy, a snarky AI bat assistant in a voice conversation.
 Keep responses concise and conversational - this is spoken, not written.
 Be natural, use contractions, don't be overly formal.
@@ -53,6 +62,18 @@ Respond in the same language as the user speaks to you.
 
 `;
 
+  // Use cached memory if available (pushed via API)
+  if (cachedMemory.updatedAt) {
+    if (cachedMemory.soul) context += `\n## SOUL.md\n${cachedMemory.soul}\n`;
+    if (cachedMemory.user) context += `\n## USER.md\n${cachedMemory.user}\n`;
+    if (cachedMemory.memory) context += `\n## MEMORY.md\n${cachedMemory.memory}\n`;
+    if (cachedMemory.today) context += `\n## Today\n${cachedMemory.today}\n`;
+    log('Using cached memory from', cachedMemory.updatedAt);
+    return context;
+  }
+
+  // Fallback: try to read from filesystem (for local dev)
+  const files = ['SOUL.md', 'USER.md', 'MEMORY.md'];
   for (const file of files) {
     const path = join(MEMORY_PATH, file);
     if (existsSync(path)) {
@@ -332,7 +353,71 @@ app.get('/health', (req, res) => {
     status: 'ok',
     provider: PROVIDER,
     model: MODEL,
-    websocket: 'enabled'
+    websocket: 'enabled',
+    memory: {
+      cached: !!cachedMemory.updatedAt,
+      updatedAt: cachedMemory.updatedAt
+    }
+  });
+});
+
+// Memory sync endpoint - POST to update cached memory
+app.post('/memory', (req, res) => {
+  // Auth check
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  const { soul, user, memory, today } = req.body;
+  
+  cachedMemory = {
+    soul: soul || cachedMemory.soul,
+    user: user || cachedMemory.user,
+    memory: memory || cachedMemory.memory,
+    today: today || cachedMemory.today,
+    updatedAt: new Date().toISOString()
+  };
+  
+  log('Memory updated:', {
+    soul: cachedMemory.soul?.length || 0,
+    user: cachedMemory.user?.length || 0,
+    memory: cachedMemory.memory?.length || 0,
+    today: cachedMemory.today?.length || 0
+  });
+  
+  res.json({ 
+    ok: true, 
+    updatedAt: cachedMemory.updatedAt,
+    sizes: {
+      soul: cachedMemory.soul?.length || 0,
+      user: cachedMemory.user?.length || 0,
+      memory: cachedMemory.memory?.length || 0,
+      today: cachedMemory.today?.length || 0
+    }
+  });
+});
+
+// Memory debug endpoint - GET to check current state
+app.get('/memory', (req, res) => {
+  // Auth check
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  res.json({
+    updatedAt: cachedMemory.updatedAt,
+    sizes: {
+      soul: cachedMemory.soul?.length || 0,
+      user: cachedMemory.user?.length || 0,
+      memory: cachedMemory.memory?.length || 0,
+      today: cachedMemory.today?.length || 0
+    }
   });
 });
 
