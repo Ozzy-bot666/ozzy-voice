@@ -2,6 +2,7 @@ import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
+import { Retell } from 'retell-sdk';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { readFileSync, existsSync, appendFileSync } from 'fs';
@@ -26,6 +27,7 @@ const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const RETELL_API_KEY = process.env.RETELL_API_KEY; // For signature verification
 
 function getDefaultModel(provider) {
   switch (provider) {
@@ -101,21 +103,47 @@ function ipWhitelist(req, res, next) {
   next();
 }
 
-// Auth middleware
+// Auth middleware - supports both Bearer token and Retell signature
 function authenticate(req, res, next) {
-  if (!API_KEY) return next();
-  
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
-    auditLog(req, 401, { reason: 'Missing auth header' });
-    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  // Option 1: Retell signature verification
+  const retellSignature = req.headers['x-retell-signature'];
+  if (retellSignature && RETELL_API_KEY) {
+    try {
+      const isValid = Retell.verify(
+        JSON.stringify(req.body),
+        RETELL_API_KEY,
+        retellSignature
+      );
+      if (isValid) {
+        auditLog(req, 200, { auth: 'retell-signature' });
+        return next();
+      }
+    } catch (e) {
+      console.error('Retell signature verification error:', e.message);
+    }
+    auditLog(req, 401, { reason: 'Invalid Retell signature' });
+    return res.status(401).json({ error: 'Invalid Retell signature' });
   }
   
-  if (authHeader.substring(7) !== API_KEY) {
-    auditLog(req, 401, { reason: 'Invalid API key' });
-    return res.status(401).json({ error: 'Invalid API key' });
+  // Option 2: Bearer token auth
+  if (API_KEY) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      auditLog(req, 401, { reason: 'Missing auth header' });
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+    
+    if (authHeader.substring(7) !== API_KEY) {
+      auditLog(req, 401, { reason: 'Invalid API key' });
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+    
+    auditLog(req, 200, { auth: 'bearer-token' });
+    return next();
   }
   
+  // No auth configured
+  auditLog(req, 200, { auth: 'disabled' });
   next();
 }
 
@@ -391,8 +419,11 @@ app.get('/health', limiter, (req, res) => {
     status: 'ok', 
     provider: PROVIDER,
     model: MODEL,
-    auth: API_KEY ? 'enabled' : 'disabled',
-    ipWhitelist: ALLOWED_IPS.length > 0 ? 'enabled' : 'disabled'
+    auth: {
+      bearer: API_KEY ? 'enabled' : 'disabled',
+      retell: RETELL_API_KEY ? 'enabled' : 'disabled',
+      ipWhitelist: ALLOWED_IPS.length > 0 ? 'enabled' : 'disabled'
+    }
   });
 });
 
@@ -476,6 +507,6 @@ app.listen(PORT, () => {
   console.log(`Provider: ${PROVIDER}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Memory path: ${MEMORY_PATH}`);
-  console.log(`Auth: ${API_KEY ? 'enabled' : 'disabled'}`);
+  console.log(`Auth: Bearer=${API_KEY ? 'yes' : 'no'}, Retell=${RETELL_API_KEY ? 'yes' : 'no'}`);
   console.log(`IP whitelist: ${ALLOWED_IPS.length > 0 ? ALLOWED_IPS.join(', ') : 'disabled'}`);
 });
