@@ -1,0 +1,19 @@
+# Render Blueprint
+services:
+  - type: web
+    name: ozzy-voice
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: MODEL
+        value: claude-sonnet-4-20250514
+      - key: MEMORY_PATH
+        value: /home/node/clawd
+    # Note: For shared memory with main Clawdbot, 
+    # you'll need a persistent disk or external storage

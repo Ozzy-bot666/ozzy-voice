@@ -1,0 +1,19 @@
+{
+  "name": "ozzy-voice",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible voice endpoint for Ozzy (Claude Sonnet)",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": ["openai", "anthropic", "voice", "retell", "pipecat"],
+  "author": "Ozzy",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
