@@ -21,6 +21,63 @@ const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 const MEMORY_SECRET = process.env.MEMORY_SECRET || ''; // For /memory endpoint auth
 const TOOLS_ENABLED = process.env.TOOLS_ENABLED !== 'false'; // Enable by default
 
+// Security metrics (read-only from external perspective)
+const securityMetrics = {
+  startTime: Date.now(),
+  requests: {
+    total: 0,
+    authenticated: 0,
+    failed_auth: 0,
+    by_endpoint: {}
+  },
+  lastFailedAuth: null,
+  recentFailedAuths: [], // Last 100, for pattern detection
+  wsConnections: {
+    total: 0,
+    active: 0
+  }
+};
+
+// Track request for security metrics
+function trackRequest(endpoint, authenticated, ip) {
+  securityMetrics.requests.total++;
+  securityMetrics.requests.by_endpoint[endpoint] = (securityMetrics.requests.by_endpoint[endpoint] || 0) + 1;
+  
+  if (authenticated) {
+    securityMetrics.requests.authenticated++;
+  }
+}
+
+function trackFailedAuth(endpoint, ip) {
+  securityMetrics.requests.failed_auth++;
+  securityMetrics.lastFailedAuth = new Date().toISOString();
+  
+  // Keep last 100 failed auths for pattern analysis
+  securityMetrics.recentFailedAuths.push({
+    time: Date.now(),
+    endpoint,
+    ip: ip ? ip.replace(/^::ffff:/, '') : 'unknown' // Normalize IPv4-mapped IPv6
+  });
+  if (securityMetrics.recentFailedAuths.length > 100) {
+    securityMetrics.recentFailedAuths.shift();
+  }
+}
+
+// Auth check helper with tracking
+function checkAuth(req, res, endpoint) {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      trackFailedAuth(endpoint, req.ip);
+      trackRequest(endpoint, false, req.ip);
+      res.status(401).json({ error: 'Unauthorized' });
+      return false;
+    }
+  }
+  trackRequest(endpoint, true, req.ip);
+  return true;
+}
+
 // Cached memory (updated via API)
 let cachedMemory = {
   soul: '',
@@ -609,11 +666,18 @@ async function handleResponseRequired(ws, callId, event, systemPrompt) {
 // ============ HTTP ENDPOINTS ============
 
 app.get('/health', (req, res) => {
+  trackRequest('/health', false, req.ip);
+  
+  // Calculate failed auths in last hour
+  const oneHourAgo = Date.now() - 3600000;
+  const failedAuthsLastHour = securityMetrics.recentFailedAuths.filter(a => a.time > oneHourAgo).length;
+  
   res.json({
     status: 'ok',
     provider: PROVIDER,
     model: MODEL,
     websocket: 'enabled',
+    uptime: Math.floor((Date.now() - securityMetrics.startTime) / 1000),
     tools: {
       enabled: TOOLS_ENABLED,
       available: toolDefinitions.map(t => t.name)
@@ -627,19 +691,19 @@ app.get('/health', (req, res) => {
       pending: cachedTodos.todos.filter(t => t.status.includes('pending')).length,
       lastUpdated: cachedTodos.lastUpdated
     },
-    pendingActions: pendingActions.filter(a => a.status === 'pending').length
+    pendingActions: pendingActions.filter(a => a.status === 'pending').length,
+    security: {
+      requests: securityMetrics.requests.total,
+      failedAuths: securityMetrics.requests.failed_auth,
+      failedAuthsLastHour,
+      wsConnections: securityMetrics.wsConnections.active
+    }
   });
 });
 
 // Memory sync endpoint - POST to update cached memory
 app.post('/memory', (req, res) => {
-  // Auth check
-  const authHeader = req.headers.authorization;
-  if (MEMORY_SECRET) {
-    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-  }
+  if (!checkAuth(req, res, '/memory')) return;
   
   const { soul, user, memory, today } = req.body;
   
