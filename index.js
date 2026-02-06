@@ -66,6 +66,52 @@ const toolDefinitions = [
       },
       required: ['message']
     }
+  },
+  {
+    name: 'add_todo',
+    description: 'Add a task to the todo list. Use when user says "add todo", "add task", "remind me to do", or similar.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description: 'The task description'
+        },
+        needs_research: {
+          type: 'boolean',
+          description: 'Set to true if this task requires research (e.g., "research best CRM", "find out about X"). Default false.'
+        }
+      },
+      required: ['task']
+    }
+  },
+  {
+    name: 'list_todos',
+    description: 'List current todo items. Use when user asks "what\'s on my todo list", "my tasks", "what do I need to do".',
+    parameters: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          description: 'Filter by status: "all", "pending", "researching", "done". Default "pending".'
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'complete_todo',
+    description: 'Mark a todo item as complete. Use when user says "mark X as done", "completed X", "finished X".',
+    parameters: {
+      type: 'object',
+      properties: {
+        task_query: {
+          type: 'string',
+          description: 'Part of the task name to identify which todo to complete'
+        }
+      },
+      required: ['task_query']
+    }
   }
 ];
 
@@ -77,6 +123,9 @@ const geminiTools = [{
     parameters: t.parameters
   }))
 }];
+
+// Cached todos (synced via API)
+let cachedTodos = { todos: [], lastUpdated: null };
 
 // Execute a tool and return result
 async function executeTool(name, params, callId) {
@@ -107,6 +156,83 @@ async function executeTool(name, params, callId) {
         message: 'Message queued for delivery',
         action_id: action.id
       };
+    
+    case 'add_todo': {
+      const todo = {
+        id: `todo-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+        task: params.task,
+        type: params.needs_research ? 'research' : 'task',
+        status: params.needs_research ? 'pending_research' : 'pending',
+        created: new Date().toISOString(),
+        research: null,
+        approved: false
+      };
+      cachedTodos.todos.push(todo);
+      cachedTodos.lastUpdated = new Date().toISOString();
+      
+      // Queue action for Clawdbot to persist and potentially start research
+      action.todo = todo;
+      pendingActions.push(action);
+      
+      const researchNote = params.needs_research ? ' Research team will investigate.' : '';
+      return { 
+        success: true, 
+        message: `Added to todo list: "${params.task}".${researchNote}`,
+        todo_id: todo.id
+      };
+    }
+    
+    case 'list_todos': {
+      const status = params.status || 'pending';
+      let todos = cachedTodos.todos;
+      
+      if (status !== 'all') {
+        todos = todos.filter(t => t.status.includes(status) || t.status === status);
+      }
+      
+      if (todos.length === 0) {
+        return { 
+          success: true, 
+          message: 'Your todo list is empty.',
+          todos: []
+        };
+      }
+      
+      const summaries = todos.map((t, i) => `${i + 1}. ${t.task}${t.type === 'research' ? ' (research)' : ''}`);
+      return { 
+        success: true, 
+        message: `You have ${todos.length} item${todos.length > 1 ? 's' : ''}: ${summaries.join('; ')}`,
+        todos: todos
+      };
+    }
+    
+    case 'complete_todo': {
+      const query = params.task_query.toLowerCase();
+      const todo = cachedTodos.todos.find(t => 
+        t.task.toLowerCase().includes(query) && t.status !== 'done'
+      );
+      
+      if (!todo) {
+        return { 
+          success: false, 
+          message: `Could not find a pending todo matching "${params.task_query}"`
+        };
+      }
+      
+      todo.status = 'done';
+      todo.completed = new Date().toISOString();
+      cachedTodos.lastUpdated = new Date().toISOString();
+      
+      // Queue action for Clawdbot to persist
+      action.todo_id = todo.id;
+      pendingActions.push(action);
+      
+      return { 
+        success: true, 
+        message: `Marked as done: "${todo.task}"`,
+        todo_id: todo.id
+      };
+    }
       
     default:
       return { success: false, error: `Unknown tool: ${name}` };
@@ -496,6 +622,11 @@ app.get('/health', (req, res) => {
       cached: !!cachedMemory.updatedAt,
       updatedAt: cachedMemory.updatedAt
     },
+    todos: {
+      count: cachedTodos.todos.length,
+      pending: cachedTodos.todos.filter(t => t.status.includes('pending')).length,
+      lastUpdated: cachedTodos.lastUpdated
+    },
     pendingActions: pendingActions.filter(a => a.status === 'pending').length
   });
 });
@@ -609,6 +740,62 @@ app.delete('/actions/completed', (req, res) => {
   const before = pendingActions.length;
   pendingActions = pendingActions.filter(a => a.status === 'pending');
   res.json({ ok: true, removed: before - pendingActions.length });
+});
+
+// ============ TODO ENDPOINTS ============
+
+// GET all todos
+app.get('/todos', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  res.json(cachedTodos);
+});
+
+// POST sync todos from Clawdbot
+app.post('/todos', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  const { todos } = req.body;
+  if (todos) {
+    cachedTodos.todos = todos;
+    cachedTodos.lastUpdated = new Date().toISOString();
+    log('Todos synced:', todos.length, 'items');
+  }
+  
+  res.json({ ok: true, count: cachedTodos.todos.length, lastUpdated: cachedTodos.lastUpdated });
+});
+
+// PATCH update a specific todo (e.g., add research results)
+app.patch('/todos/:id', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (MEMORY_SECRET) {
+    if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  const { id } = req.params;
+  const updates = req.body;
+  
+  const todo = cachedTodos.todos.find(t => t.id === id);
+  if (!todo) {
+    return res.status(404).json({ error: 'Todo not found' });
+  }
+  
+  Object.assign(todo, updates);
+  cachedTodos.lastUpdated = new Date().toISOString();
+  
+  res.json({ ok: true, todo });
 });
 
 // Catch-all for unmatched routes
