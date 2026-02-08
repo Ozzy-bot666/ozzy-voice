@@ -20,6 +20,7 @@ const MEMORY_PATH = process.env.MEMORY_PATH || '/home/node/clawd';
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 const MEMORY_SECRET = process.env.MEMORY_SECRET || ''; // For /memory endpoint auth
 const TOOLS_ENABLED = process.env.TOOLS_ENABLED !== 'false'; // Enable by default
+const VAULT_API_URL = process.env.VAULT_API_URL || 'http://31.187.76.240:8000'; // Obsidian Vault API
 
 // Security metrics (read-only from external perspective)
 const securityMetrics = {
@@ -207,6 +208,45 @@ const toolDefinitions = [
       },
       required: ['task_query']
     }
+  },
+  {
+    name: 'vault_list',
+    description: 'List files in the Obsidian vault. Use when user asks "what notes do I have", "list my files".',
+    parameters: { type: 'object', properties: {}, required: [] }
+  },
+  {
+    name: 'vault_read',
+    description: 'Read a note from the vault. Use when user asks "read my note about X", "what does note X say".',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'The file path/name (e.g., "Meeting Notes.md")' }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'vault_create',
+    description: 'Create a new note. Use when user says "create a note", "save this to my vault".',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path for the new note' },
+        content: { type: 'string', description: 'The content to write (markdown)' }
+      },
+      required: ['path', 'content']
+    }
+  },
+  {
+    name: 'vault_search',
+    description: 'Search notes containing text. Use when user asks "find notes about X".',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query' }
+      },
+      required: ['query']
+    }
   }
 ];
 
@@ -327,6 +367,63 @@ async function executeTool(name, params, callId) {
         message: `Marked as done: "${todo.task}"`,
         todo_id: todo.id
       };
+    }
+    
+    // Vault tools
+    case 'vault_list': {
+      try {
+        const res = await fetch(`${VAULT_API_URL}/api/files`);
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        const files = await res.json();
+        const list = files.map(f => f.path).slice(0, 10).join(', ');
+        return { success: true, message: `You have ${files.length} files: ${list}`, files };
+      } catch (e) {
+        return { success: false, message: `Could not access vault: ${e.message}` };
+      }
+    }
+    
+    case 'vault_read': {
+      try {
+        const res = await fetch(`${VAULT_API_URL}/api/files/${encodeURIComponent(params.path)}`);
+        if (!res.ok) throw new Error(`File not found`);
+        const data = await res.json();
+        const content = (data.content || '').substring(0, 400);
+        return { success: true, message: `Note "${params.path}": ${content}`, content: data.content };
+      } catch (e) {
+        return { success: false, message: `Could not read note: ${e.message}` };
+      }
+    }
+    
+    case 'vault_create': {
+      try {
+        const res = await fetch(`${VAULT_API_URL}/api/files`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: params.path, content: params.content })
+        });
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        return { success: true, message: `Created note "${params.path}"` };
+      } catch (e) {
+        return { success: false, message: `Could not create note: ${e.message}` };
+      }
+    }
+    
+    case 'vault_search': {
+      try {
+        const res = await fetch(`${VAULT_API_URL}/api/files`);
+        const files = await res.json();
+        const matches = [];
+        for (const f of files.slice(0, 15)) {
+          const cr = await fetch(`${VAULT_API_URL}/api/files/${encodeURIComponent(f.path)}`);
+          if (cr.ok) {
+            const d = await cr.json();
+            if ((d.content || '').toLowerCase().includes(params.query.toLowerCase())) matches.push(f.path);
+          }
+        }
+        return { success: true, message: matches.length ? `Found: ${matches.join(', ')}` : `No notes found for "${params.query}"`, results: matches };
+      } catch (e) {
+        return { success: false, message: `Search failed: ${e.message}` };
+      }
     }
       
     default:
