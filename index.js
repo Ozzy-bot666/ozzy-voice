@@ -247,6 +247,17 @@ const toolDefinitions = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web for current information. Use when user asks about news, current events, facts, or anything that needs up-to-date information from the internet.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query' }
+      },
+      required: ['query']
+    }
   }
 ];
 
@@ -422,6 +433,47 @@ async function executeTool(name, params, callId) {
         }
         return { success: true, message: matches.length ? `Found: ${matches.join(', ')}` : `No notes found for "${params.query}"`, results: matches };
       } catch (e) {
+        return { success: false, message: `Search failed: ${e.message}` };
+      }
+    }
+
+    case 'web_search': {
+      const tavilyKey = process.env.TAVILY_API_KEY;
+      if (!tavilyKey) {
+        return { success: false, message: 'Web search is not configured' };
+      }
+      try {
+        log(`[${callId}] Web search: "${params.query}"`);
+        const res = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: tavilyKey,
+            query: params.query,
+            search_depth: 'basic',
+            max_results: 5,
+            include_answer: true
+          })
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          throw new Error(`Tavily API error: ${res.status}`);
+        }
+        const data = await res.json();
+        // Format results for voice - concise and speakable
+        let response = '';
+        if (data.answer) {
+          response = data.answer;
+        } else if (data.results && data.results.length > 0) {
+          // Summarize top results
+          const summaries = data.results.slice(0, 3).map(r => r.content?.slice(0, 150) || r.title);
+          response = summaries.join('. ');
+        } else {
+          response = `No results found for "${params.query}"`;
+        }
+        return { success: true, message: response, results: data.results?.slice(0, 3) };
+      } catch (e) {
+        log(`[${callId}] Web search error:`, e.message);
         return { success: false, message: `Search failed: ${e.message}` };
       }
     }
