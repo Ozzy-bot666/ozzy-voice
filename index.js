@@ -462,6 +462,13 @@ Keep responses concise and conversational - this is spoken, not written.
 Be natural, use contractions, don't be overly formal.
 Respond in the same language as the user speaks to you.
 
+CRITICAL: This is a VOICE conversation - your responses will be spoken aloud by TTS.
+- NEVER use markdown formatting (no **, *, #, -, bullets, etc.)
+- NEVER say "asterisk", "hashtag", "bullet point" or describe formatting
+- Just speak naturally as if talking to someone
+- For emphasis, use word choice and phrasing, not formatting symbols
+- Lists should be spoken naturally: "First... Second... Third..." or "One thing is X, another is Y"
+
 `;
 
   // Use cached memory if available (pushed via API)
