@@ -470,6 +470,7 @@ Respond in the same language as the user speaks to you.
     if (cachedMemory.user) context += `\n## USER.md\n${cachedMemory.user}\n`;
     if (cachedMemory.memory) context += `\n## MEMORY.md\n${cachedMemory.memory}\n`;
     if (cachedMemory.today) context += `\n## Today\n${cachedMemory.today}\n`;
+    if (cachedMemory.channels) context += `\n## Recent Channel Activity\n${cachedMemory.channels}\n`;
     log('Using cached memory from', cachedMemory.updatedAt);
     return context;
   }
@@ -710,11 +711,11 @@ function handleRetellConnection(ws, callId) {
   ws.send(JSON.stringify({
     response_type: 'update_agent',
     agent_config: {
-      responsiveness: 0.6,           // 0-1: lower = wait longer before responding (default ~0.9)
+      responsiveness: 0.8,           // 0-1: lower = wait longer before responding (default ~0.9)
       interruption_sensitivity: 0.4  // 0-1: lower = harder to interrupt agent (default ~0.8)
     }
   }));
-  log(`[${callId}] Agent config: responsiveness=0.6, interruption_sensitivity=0.4`);
+  log(`[${callId}] Agent config: responsiveness=0.8, interruption_sensitivity=0.4`);
 
   // Send initial greeting (empty = wait for user to speak first)
   ws.send(JSON.stringify({
@@ -912,13 +913,14 @@ app.get('/health', (req, res) => {
 app.post('/memory', (req, res) => {
   if (!checkAuth(req, res, '/memory')) return;
 
-  const { soul, user, memory, today } = req.body;
+  const { soul, user, memory, today, channels } = req.body;
 
   cachedMemory = {
     soul: soul || cachedMemory.soul,
     user: user || cachedMemory.user,
     memory: memory || cachedMemory.memory,
     today: today || cachedMemory.today,
+    channels: channels || cachedMemory.channels,
     updatedAt: new Date().toISOString()
   };
 
