@@ -58,15 +58,15 @@ function isSuspiciousUserAgent(ua) {
 function trackRequest(endpoint, authenticated, ip, userAgent) {
   securityMetrics.requests.total++;
   securityMetrics.requests.by_endpoint[endpoint] = (securityMetrics.requests.by_endpoint[endpoint] || 0) + 1;
-  
+
   // Track by IP
   const normalizedIp = ip ? ip.replace(/^::ffff:/, '') : 'unknown';
   securityMetrics.requests.by_ip[normalizedIp] = (securityMetrics.requests.by_ip[normalizedIp] || 0) + 1;
-  
+
   if (authenticated) {
     securityMetrics.requests.authenticated++;
   }
-  
+
   // Check for suspicious user agent
   if (userAgent && isSuspiciousUserAgent(userAgent)) {
     securityMetrics.suspiciousUserAgents.push({
@@ -85,9 +85,9 @@ function trackRequest(endpoint, authenticated, ip, userAgent) {
 function trackFailedAuth(endpoint, ip, userAgent) {
   securityMetrics.requests.failed_auth++;
   securityMetrics.lastFailedAuth = new Date().toISOString();
-  
+
   const normalizedIp = ip ? ip.replace(/^::ffff:/, '') : 'unknown';
-  
+
   // Keep last 100 failed auths for pattern analysis
   securityMetrics.recentFailedAuths.push({
     time: Date.now(),
@@ -104,7 +104,7 @@ function trackFailedAuth(endpoint, ip, userAgent) {
 function checkAuth(req, res, endpoint) {
   const authHeader = req.headers.authorization;
   const userAgent = req.headers['user-agent'];
-  
+
   if (MEMORY_SECRET) {
     if (!authHeader || authHeader !== `Bearer ${MEMORY_SECRET}`) {
       trackFailedAuth(endpoint, req.ip, userAgent);
@@ -142,7 +142,7 @@ const toolDefinitions = [
           description: 'What to remind about (e.g., "call mom", "take medication")'
         },
         time: {
-          type: 'string', 
+          type: 'string',
           description: 'When to remind. Use natural language like "in 20 minutes", "at 5pm", "tomorrow at 9am", or ISO format.'
         }
       },
@@ -272,26 +272,26 @@ async function executeTool(name, params, callId) {
     createdAt: new Date().toISOString(),
     status: 'pending'
   };
-  
+
   log(`[${callId}] Tool call: ${name}`, params);
-  
+
   switch (name) {
     case 'create_reminder':
       pendingActions.push(action);
-      return { 
-        success: true, 
+      return {
+        success: true,
         message: `Reminder scheduled for ${params.time}`,
         action_id: action.id
       };
-      
+
     case 'send_message':
       pendingActions.push(action);
-      return { 
-        success: true, 
+      return {
+        success: true,
         message: 'Message queued for delivery',
         action_id: action.id
       };
-    
+
     case 'add_todo': {
       const todo = {
         id: `todo-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
@@ -304,71 +304,71 @@ async function executeTool(name, params, callId) {
       };
       cachedTodos.todos.push(todo);
       cachedTodos.lastUpdated = new Date().toISOString();
-      
+
       // Queue action for Clawdbot to persist and potentially start research
       action.todo = todo;
       pendingActions.push(action);
-      
+
       const researchNote = params.needs_research ? ' Research team will investigate.' : '';
-      return { 
-        success: true, 
+      return {
+        success: true,
         message: `Added to todo list: "${params.task}".${researchNote}`,
         todo_id: todo.id
       };
     }
-    
+
     case 'list_todos': {
       const status = params.status || 'pending';
       let todos = cachedTodos.todos;
-      
+
       if (status !== 'all') {
         todos = todos.filter(t => t.status.includes(status) || t.status === status);
       }
-      
+
       if (todos.length === 0) {
-        return { 
-          success: true, 
+        return {
+          success: true,
           message: 'Your todo list is empty.',
           todos: []
         };
       }
-      
+
       const summaries = todos.map((t, i) => `${i + 1}. ${t.task}${t.type === 'research' ? ' (research)' : ''}`);
-      return { 
-        success: true, 
+      return {
+        success: true,
         message: `You have ${todos.length} item${todos.length > 1 ? 's' : ''}: ${summaries.join('; ')}`,
         todos: todos
       };
     }
-    
+
     case 'complete_todo': {
       const query = params.task_query.toLowerCase();
-      const todo = cachedTodos.todos.find(t => 
+      const todo = cachedTodos.todos.find(t =>
         t.task.toLowerCase().includes(query) && t.status !== 'done'
       );
-      
+
       if (!todo) {
-        return { 
-          success: false, 
+        return {
+          success: false,
           message: `Could not find a pending todo matching "${params.task_query}"`
         };
       }
-      
+
       todo.status = 'done';
       todo.completed = new Date().toISOString();
       cachedTodos.lastUpdated = new Date().toISOString();
-      
+
       // Queue action for Clawdbot to persist
       action.todo_id = todo.id;
       pendingActions.push(action);
-      
-      return { 
-        success: true, 
+
+      return {
+        success: true,
         message: `Marked as done: "${todo.task}"`,
         todo_id: todo.id
       };
     }
-    
+
     // Vault tools
     case 'vault_list': {
       try {
@@ -381,7 +381,7 @@ async function executeTool(name, params, callId) {
         return { success: false, message: `Could not access vault: ${e.message}` };
       }
     }
-    
+
     case 'vault_read': {
       try {
         const res = await fetch(`${VAULT_API_URL}/api/files/${encodeURIComponent(params.path)}`);
@@ -393,7 +393,7 @@ async function executeTool(name, params, callId) {
         return { success: false, message: `Could not read note: ${e.message}` };
       }
     }
-    
+
     case 'vault_create': {
       try {
         const res = await fetch(`${VAULT_API_URL}/api/files`, {
@@ -407,7 +407,7 @@ async function executeTool(name, params, callId) {
         return { success: false, message: `Could not create note: ${e.message}` };
       }
     }
-    
+
     case 'vault_search': {
       try {
         const res = await fetch(`${VAULT_API_URL}/api/files`);
@@ -425,7 +425,7 @@ async function executeTool(name, params, callId) {
         return { success: false, message: `Search failed: ${e.message}` };
       }
     }
-      
+
     default:
       return { success: false, error: `Unknown tool: ${name}` };
   }
@@ -556,10 +556,10 @@ async function* streamAnthropic(systemPrompt, messages) {
 async function callGoogle(systemPrompt, messages) {
   if (!google) throw new Error('Google not configured');
   const model = google.getGenerativeModel({ model: MODEL, systemInstruction: systemPrompt });
-  
+
   const history = [];
   let lastMessage = 'Hello';
-  
+
   for (const msg of messages) {
     if (msg.role === 'user') {
       lastMessage = msg.content;
@@ -568,11 +568,11 @@ async function callGoogle(systemPrompt, messages) {
       history.push({ role: 'model', parts: [{ text: msg.content }] });
     }
   }
-  
+
   if (history.length > 0 && history[history.length - 1].role === 'user') {
     history.pop();
   }
-  
+
   const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 200, temperature: 0.7 } });
   const result = await chat.sendMessage(lastMessage);
   return result.response.text();
@@ -580,22 +580,22 @@ async function callGoogle(systemPrompt, messages) {
 
 async function* streamGoogle(systemPrompt, messages, callId = 'unknown') {
   if (!google) throw new Error('Google not configured');
-  
-  const modelConfig = { 
-    model: MODEL, 
+
+  const modelConfig = {
+    model: MODEL,
     systemInstruction: systemPrompt
   };
-  
+
   // Add tools if enabled
   if (TOOLS_ENABLED) {
     modelConfig.tools = geminiTools;
   }
-  
+
   const model = google.getGenerativeModel(modelConfig);
-  
+
   const history = [];
   let lastMessage = 'Hello';
-  
+
   for (const msg of messages) {
     if (msg.role === 'user') {
       lastMessage = msg.content;
@@ -604,29 +604,29 @@ async function* streamGoogle(systemPrompt, messages, callId = 'unknown') {
       history.push({ role: 'model', parts: [{ text: msg.content }] });
     }
   }
-  
+
   if (history.length > 0 && history[history.length - 1].role === 'user') {
     history.pop();
   }
-  
-  const chat = model.startChat({ 
-    history, 
+
+  const chat = model.startChat({
+    history,
     generationConfig: { maxOutputTokens: 200, temperature: 0.7 }
   });
-  
+
   // First call - might be text or function call
   const result = await chat.sendMessage(lastMessage);
   const response = result.response;
-  
+
   // Check for function calls
   const functionCalls = response.functionCalls();
-  
+
   if (functionCalls && functionCalls.length > 0) {
     // Execute tool(s) and get final response
     for (const fc of functionCalls) {
       log(`[${callId}] Function call detected: ${fc.name}`);
       const toolResult = await executeTool(fc.name, fc.args, callId);
-      
+
       // Send function result back to model
       const followUp = await chat.sendMessage([{
         functionResponse: {
@@ -634,7 +634,7 @@ async function* streamGoogle(systemPrompt, messages, callId = 'unknown') {
           response: toolResult
         }
       }]);
-      
+
       // Stream the final response
       const finalText = followUp.response.text();
       if (finalText) {
@@ -693,9 +693,9 @@ async function* streamOpenAI(systemPrompt, messages) {
 
 function handleRetellConnection(ws, callId) {
   log(`[${callId}] WebSocket connected`);
-  
+
   const systemPrompt = buildSystemContext();
-  
+
   // Send initial config
   ws.send(JSON.stringify({
     response_type: 'config',
@@ -704,7 +704,18 @@ function handleRetellConnection(ws, callId) {
       call_details: false
     }
   }));
-  
+
+  // Configure agent behavior to reduce unwanted interruptions
+  // Lower values = harder to interrupt, more patient responses
+  ws.send(JSON.stringify({
+    response_type: 'update_agent',
+    agent_config: {
+      responsiveness: 0.6,           // 0-1: lower = wait longer before responding (default ~0.9)
+      interruption_sensitivity: 0.4  // 0-1: lower = harder to interrupt agent (default ~0.8)
+    }
+  }));
+  log(`[${callId}] Agent config: responsiveness=0.6, interruption_sensitivity=0.4`);
+
   // Send initial greeting (empty = wait for user to speak first)
   ws.send(JSON.stringify({
     response_type: 'response',
@@ -712,12 +723,12 @@ function handleRetellConnection(ws, callId) {
     content: '',
     content_complete: true
   }));
-  
+
   ws.on('message', async (data) => {
     try {
       const event = JSON.parse(data.toString());
       log(`[${callId}] Received:`, event.interaction_type);
-      
+
       switch (event.interaction_type) {
         case 'ping_pong':
           // Respond to ping
@@ -726,17 +737,17 @@ function handleRetellConnection(ws, callId) {
             timestamp: Date.now()
           }));
           break;
-          
+
         case 'update_only':
           // Just an update, no response needed
           break;
-          
+
         case 'response_required':
         case 'reminder_required':
           // Generate response
           await handleResponseRequired(ws, callId, event, systemPrompt);
           break;
-          
+
         default:
           log(`[${callId}] Unknown interaction_type:`, event.interaction_type);
       }
@@ -744,11 +755,11 @@ function handleRetellConnection(ws, callId) {
       console.error(`[${callId}] Error processing message:`, e);
     }
   });
-  
+
   ws.on('close', () => {
     log(`[${callId}] WebSocket closed`);
   });
-  
+
   ws.on('error', (err) => {
     console.error(`[${callId}] WebSocket error:`, err);
   });
@@ -756,16 +767,16 @@ function handleRetellConnection(ws, callId) {
 
 async function handleResponseRequired(ws, callId, event, systemPrompt) {
   const { response_id, transcript } = event;
-  
+
   try {
     const messages = transcriptToMessages(transcript || []);
     log(`[${callId}] Generating response for response_id=${response_id}, messages=${messages.length}`);
-    
+
     // Stream the response
     let fullContent = '';
     for await (const chunk of streamLLM(systemPrompt, messages, callId)) {
       fullContent += chunk;
-      
+
       // Send partial response
       ws.send(JSON.stringify({
         response_type: 'response',
@@ -774,7 +785,7 @@ async function handleResponseRequired(ws, callId, event, systemPrompt) {
         content_complete: false
       }));
     }
-    
+
     // Send final response marker
     ws.send(JSON.stringify({
       response_type: 'response',
@@ -782,12 +793,12 @@ async function handleResponseRequired(ws, callId, event, systemPrompt) {
       content: '',
       content_complete: true
     }));
-    
+
     log(`[${callId}] Response complete: ${fullContent.substring(0, 50)}...`);
-    
+
   } catch (e) {
     console.error(`[${callId}] LLM error:`, e);
-    
+
     // Send error response
     ws.send(JSON.stringify({
       response_type: 'response',
@@ -814,7 +825,7 @@ const webCallCors = (req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  
+
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
@@ -825,18 +836,18 @@ const webCallCors = (req, res, next) => {
 app.options('/create-web-call', webCallCors);
 app.post('/create-web-call', webCallCors, async (req, res) => {
   trackRequest('/create-web-call', false, req.ip, req.headers['user-agent']);
-  
+
   const { agent_id, metadata, retell_llm_dynamic_variables } = req.body;
-  
+
   if (!process.env.RETELL_API_KEY) {
     console.error('RETELL_API_KEY not configured');
     return res.status(500).json({ error: 'Server configuration error' });
   }
-  
+
   const payload = { agent_id };
   if (metadata) payload.metadata = metadata;
   if (retell_llm_dynamic_variables) payload.retell_llm_dynamic_variables = retell_llm_dynamic_variables;
-  
+
   try {
     const response = await fetch('https://api.retellai.com/v2/create-web-call', {
       method: 'POST',
@@ -846,14 +857,14 @@ app.post('/create-web-call', webCallCors, async (req, res) => {
       },
       body: JSON.stringify(payload)
     });
-    
+
     const data = await response.json();
-    
+
     if (!response.ok) {
       console.error('Retell API error:', data);
       return res.status(response.status).json(data);
     }
-    
+
     res.status(201).json(data);
   } catch (error) {
     console.error('Error creating web call:', error.message);
@@ -863,11 +874,11 @@ app.post('/create-web-call', webCallCors, async (req, res) => {
 
 app.get('/health', (req, res) => {
   trackRequest('/health', false, req.ip);
-  
+
   // Calculate failed auths in last hour
   const oneHourAgo = Date.now() - 3600000;
   const failedAuthsLastHour = securityMetrics.recentFailedAuths.filter(a => a.time > oneHourAgo).length;
-  
+
   res.json({
     status: 'ok',
     provider: PROVIDER,
@@ -900,9 +911,9 @@ app.get('/health', (req, res) => {
 // Memory sync endpoint - POST to update cached memory
 app.post('/memory', (req, res) => {
   if (!checkAuth(req, res, '/memory')) return;
-  
+
   const { soul, user, memory, today } = req.body;
-  
+
   cachedMemory = {
     soul: soul || cachedMemory.soul,
     user: user || cachedMemory.user,
@@ -910,16 +921,16 @@ app.post('/memory', (req, res) => {
     today: today || cachedMemory.today,
     updatedAt: new Date().toISOString()
   };
-  
+
   log('Memory updated:', {
     soul: cachedMemory.soul?.length || 0,
     user: cachedMemory.user?.length || 0,
     memory: cachedMemory.memory?.length || 0,
     today: cachedMemory.today?.length || 0
   });
-  
-  res.json({ 
-    ok: true, 
+
+  res.json({
+    ok: true,
     updatedAt: cachedMemory.updatedAt,
     sizes: {
       soul: cachedMemory.soul?.length || 0,
@@ -939,7 +950,7 @@ app.get('/memory', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   res.json({
     updatedAt: cachedMemory.updatedAt,
     sizes: {
@@ -956,26 +967,26 @@ app.get('/memory', (req, res) => {
 // GET detailed security metrics (auth required)
 app.get('/security', (req, res) => {
   if (!checkAuth(req, res, '/security')) return;
-  
+
   const oneHourAgo = Date.now() - 3600000;
   const recentFailedAuths = securityMetrics.recentFailedAuths.filter(a => a.time > oneHourAgo);
-  
+
   // Analyze IP patterns
   const ipCounts = {};
   for (const auth of recentFailedAuths) {
     ipCounts[auth.ip] = (ipCounts[auth.ip] || 0) + 1;
   }
-  
+
   // Find suspicious IPs (multiple failed auths)
   const suspiciousIps = Object.entries(ipCounts)
     .filter(([ip, count]) => count >= 3)
     .map(([ip, count]) => ({ ip, failedAttempts: count }))
     .sort((a, b) => b.failedAttempts - a.failedAttempts);
-  
+
   // Recent suspicious user agents
   const recentSuspiciousUAs = securityMetrics.suspiciousUserAgents
     .filter(ua => ua.time > oneHourAgo);
-  
+
   res.json({
     timestamp: new Date().toISOString(),
     uptime: Math.floor((Date.now() - securityMetrics.startTime) / 1000),
@@ -1016,7 +1027,7 @@ app.get('/actions', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   // Return pending actions and clear them
   const actions = pendingActions.filter(a => a.status === 'pending');
   res.json({ actions, count: actions.length });
@@ -1030,10 +1041,10 @@ app.post('/actions/:id/complete', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   const { id } = req.params;
   const action = pendingActions.find(a => a.id === id);
-  
+
   if (action) {
     action.status = 'completed';
     action.completedAt = new Date().toISOString();
@@ -1051,7 +1062,7 @@ app.delete('/actions/completed', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   const before = pendingActions.length;
   pendingActions = pendingActions.filter(a => a.status === 'pending');
   res.json({ ok: true, removed: before - pendingActions.length });
@@ -1067,7 +1078,7 @@ app.get('/todos', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   res.json(cachedTodos);
 });
 
@@ -1079,14 +1090,14 @@ app.post('/todos', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   const { todos } = req.body;
   if (todos) {
     cachedTodos.todos = todos;
     cachedTodos.lastUpdated = new Date().toISOString();
     log('Todos synced:', todos.length, 'items');
   }
-  
+
   res.json({ ok: true, count: cachedTodos.todos.length, lastUpdated: cachedTodos.lastUpdated });
 });
 
@@ -1098,18 +1109,18 @@ app.patch('/todos/:id', (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
-  
+
   const { id } = req.params;
   const updates = req.body;
-  
+
   const todo = cachedTodos.todos.find(t => t.id === id);
   if (!todo) {
     return res.status(404).json({ error: 'Todo not found' });
   }
-  
+
   Object.assign(todo, updates);
   cachedTodos.lastUpdated = new Date().toISOString();
-  
+
   res.json({ ok: true, todo });
 });
 
@@ -1127,7 +1138,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (request, socket, head) => {
   const pathname = request.url?.split('?')[0] || '';
   console.log('WebSocket upgrade request:', pathname);
-  
+
   if (pathname.startsWith('/llm-websocket/')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
