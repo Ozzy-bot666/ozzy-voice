@@ -633,7 +633,7 @@ async function callGoogle(systemPrompt, messages) {
     history.pop();
   }
 
-  const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 200, temperature: 0.7 } });
+  const chat = model.startChat({ history, generationConfig: { maxOutputTokens: 800, temperature: 0.7 } });
   const result = await chat.sendMessage(lastMessage);
   return result.response.text();
 }
@@ -671,7 +671,7 @@ async function* streamGoogle(systemPrompt, messages, callId = 'unknown') {
 
   const chat = model.startChat({
     history,
-    generationConfig: { maxOutputTokens: 200, temperature: 0.7 }
+    generationConfig: { maxOutputTokens: 800, temperature: 0.7 }
   });
 
   // First call - might be text or function call
