@@ -20,7 +20,7 @@ const MEMORY_PATH = process.env.MEMORY_PATH || '/home/node/clawd';
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 const MEMORY_SECRET = process.env.MEMORY_SECRET || ''; // For /memory endpoint auth
 const TOOLS_ENABLED = process.env.TOOLS_ENABLED !== 'false'; // Enable by default
-const VAULT_API_URL = process.env.VAULT_API_URL || 'http://31.187.76.240:8000'; // Obsidian Vault API
+const VAULT_API_URL = process.env.VAULT_API_URL // Obsidian Vault API
 
 // Security metrics (read-only from external perspective)
 const securityMetrics = {
