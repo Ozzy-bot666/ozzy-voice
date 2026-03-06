@@ -770,11 +770,11 @@ function handleRetellConnection(ws, callId) {
   ws.send(JSON.stringify({
     response_type: 'update_agent',
     agent_config: {
-      responsiveness: 0.8,           // 0-1: lower = wait longer before responding (default ~0.9)
+      responsiveness: 0.9,           // 0-1: lower = wait longer before responding (default ~0.9)
       interruption_sensitivity: 0.4  // 0-1: lower = harder to interrupt agent (default ~0.8)
     }
   }));
-  log(`[${callId}] Agent config: responsiveness=0.8, interruption_sensitivity=0.4`);
+  log(`[${callId}] Agent config: responsiveness=0.9, interruption_sensitivity=0.4`);
 
   // Send initial greeting (empty = wait for user to speak first)
   ws.send(JSON.stringify({
